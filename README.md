@@ -443,6 +443,3 @@ This project is created for RIFT 2026 Hackathon.
 ---
 
 **Built with ❤️ by TRANSFORMERS Team - RIFT 2026**
-#   T r a n s f o r m e r s 
- 
- 
