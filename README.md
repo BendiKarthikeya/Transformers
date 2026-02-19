@@ -1,25 +1,14 @@
-# 🤖 TRANSFORMERS CI/CD Healing Agent
+# TRANSFORMERS CI/CD Healing Agent
 
-## Project Title
-**Autonomous CI/CD Healing Agent** - RIFT 2026 Hackathon
+## Overview
+Autonomous CI/CD healing agent that clones a repo, runs tests, diagnoses failures, generates fixes with an LLM, commits changes, and pushes a branch back to GitHub. Built for the RIFT 2026 hackathon.
 
-An intelligent, multi-agent AI system that automatically detects, analyzes, and fixes CI/CD pipeline failures in real-time using advanced language models and code generation.
+## Team
+- Team Name: TRANSFORMERS
+- Team Leader: Karthikeya
+- GitHub: https://github.com/BendiKarthikeya
 
-## 🌐 Deployment URL
-[Add your Vercel URL here after deployment]
-
-**Frontend:** Vercel (React Dashboard)  
-**Backend:** Railway/AWS (FastAPI + LangGraph Agent)
-
-## 🎥 Demo Video
-[Add your LinkedIn video URL here]
-
-## 👥 Team
-- **Team Name:** TRANSFORMERS
-- **Team Leader:** Karthikeya
-- **GitHub:** https://github.com/BendiKarthikeya
-
-## 🏗️ Architecture Diagram
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -47,7 +36,7 @@ An intelligent, multi-agent AI system that automatically detects, analyzes, and 
 │  │  2. Discover Tests (pytest, pyflakes)                   │  │
 │  │  3. Run Tests (detect failures)                         │  │
 │  │  4. Analyze Failures (bug classification)               │  │
-│  │  5. Fix Code (Groq LLM - llama3-70b-8192)               │  │
+│  │  5. Fix Code (Groq LLM, OpenRouter fallback)            │  │
 │  │  6. Commit & Push (git operations)                      │  │
 │  │  7. Verify Fixes (re-run tests, max 5 iterations)       │  │
 │  │  8. Calculate Score (efficiency + success metrics)      │  │
@@ -70,14 +59,65 @@ An intelligent, multi-agent AI system that automatically detects, analyzes, and 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 🚀 Installation Instructions
+## Local Setup
 
 ### Prerequisites
-- Python 3.11+ (for backend)
-- Node.js 18+ (for frontend)
-- Git
-- GitHub account with Personal Access Token (for CI/CD)
-- Groq API key (for LLM access)
+1. Python 3.11+
+2. Node.js 18+
+3. Git
+4. GitHub Personal Access Token
+5. Groq API key (OpenRouter optional)
+
+## Configuration
+Create .env files:
+
+backend/.env
+```
+GROQ_API_KEY=your_groq_key
+GROQ_MODEL=llama-3.3-70b-versatile
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=openrouter/auto
+GITHUB_TOKEN=your_github_token
+PORT=8000
+```
+
+frontend/.env (optional)
+```
+VITE_API_URL=http://localhost:8000
+```
+
+## Run (Docker)
+```
+docker compose up -d --build
+```
+
+Frontend: http://localhost:5173
+Backend: http://localhost:8000
+
+## Run (Local)
+Backend:
+```
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Frontend:
+```
+cd frontend
+npm install
+npm run dev
+```
+
+## Usage
+1. Open the UI and enter the GitHub repo URL, team name, and leader name.
+2. Click Run Agent.
+3. The agent will create a branch and push fixes if tests fail.
+
+## Production Notes
+- Use real secrets via environment variables or secret managers.
+- Disable auto-reload and run behind a reverse proxy.
+- Configure CORS and rate limiting for the API.
 
 ### Step 1: Clone Repository
 ```bash
@@ -403,5 +443,6 @@ This project is created for RIFT 2026 Hackathon.
 ---
 
 **Built with ❤️ by TRANSFORMERS Team - RIFT 2026**
-#   T r a n s f o r m e r s  
+#   T r a n s f o r m e r s 
+ 
  
