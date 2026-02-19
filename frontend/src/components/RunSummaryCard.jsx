@@ -19,7 +19,11 @@ export default function RunSummaryCard({ results }) {
         {/* Repository */}
         <div className="bg-slate-700 rounded p-4">
           <p className="text-slate-400 text-sm mb-1">Repository</p>
-          <p className="text-white font-semibold truncate">{results.branch_name || 'N/A'}</p>
+          <p className="text-white font-semibold truncate text-sm">
+            {results.repo_url
+              ? results.repo_url.replace('https://github.com/', '')
+              : results.branch_name || 'N/A'}
+          </p>
         </div>
 
         {/* Team Info */}
@@ -99,11 +103,10 @@ export default function RunSummaryCard({ results }) {
         <div className="space-y-3">
           <div className="flex items-center justify-between p-3 bg-slate-700 rounded">
             <span className="text-slate-300">CI/CD Status</span>
-            <span className={`px-4 py-1 rounded-full font-bold text-lg ${
-              ciStatus
+            <span className={`px-4 py-1 rounded-full font-bold text-lg ${ciStatus
                 ? 'bg-green-900 text-green-200'
                 : 'bg-red-900 text-red-200'
-            }`}>
+              }`}>
               {ciStatus ? '✅ PASSED' : '❌ FAILED'}
             </span>
           </div>

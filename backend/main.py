@@ -169,6 +169,9 @@ async def run_agent(request: RunAgentRequest):
         
         # Prepare response
         response_data = {
+            "repo_url": request.repo_url,
+            "team_name": request.team_name,
+            "team_leader": request.team_leader,
             "branch_name": agent_results.get("branch_name", f"{request.team_name}_{request.team_leader}_AI_Fix"),
             "total_failures": agent_results.get("total_failures", 0),
             "total_fixes": agent_results.get("total_fixes", 0),

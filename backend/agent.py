@@ -67,59 +67,81 @@ class HealingAgent:
             )
         return self.llm
 
-    def _invoke_openrouter(self, prompt: str) -> str:
-        api_key = os.getenv("OPENROUTER_API_KEY")
+    def _invoke_gemini(self, prompt: str) -> str:
+        api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is not set")
+            raise RuntimeError("GEMINI_API_KEY is not set")
 
-        model_name = os.getenv("OPENROUTER_MODEL") or "openrouter/auto"
+        model_name = os.getenv("GEMINI_MODEL") or "gemini-1.5-flash"
+        
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        
         payload = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
         }
+        
         headers = {
-            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
         response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            url,
             json=payload,
             headers=headers,
             timeout=60
         )
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as e:
+            print(f"Error parsing Gemini response: {data}")
+            raise e
 
     def _invoke_llm(self, prompt: str) -> str:
         try:
-            message = self.get_llm().invoke(prompt)
-            return message.content
+            return self._invoke_gemini(prompt)
         except Exception as e:
-            print(f"Groq LLM failed, falling back to OpenRouter: {e}")
-            return self._invoke_openrouter(prompt)
+            print(f"Gemini LLM failed, falling back to Groq: {e}")
+            try:
+                message = self.get_llm().invoke(prompt)
+                return message.content
+            except Exception as e2:
+                raise RuntimeError(f"Both Gemini and Groq failed: {e2}")
 
-    def _clean_llm_snippet(self, text: str, original_line: str) -> str:
-        if not text:
-            return original_line
+    def _clean_full_file(self, text: str, original_content: str) -> str:
+        """Strip ALL markdown artifacts from an LLM-returned file and return clean Python."""
+        if not text or not text.strip():
+            return original_content
 
         cleaned = text.strip()
-        fence_match = re.search(r"```(?:python)?\s*(.*?)```", cleaned, re.DOTALL | re.IGNORECASE)
+
+        # Remove leading/trailing fenced code blocks (```python ... ``` or ``` ... ```)
+        fence_match = re.search(r"```(?:python)?\s*\n?(.*?)\n?```", cleaned, re.DOTALL | re.IGNORECASE)
         if fence_match:
-            cleaned = fence_match.group(1).strip()
+            cleaned = fence_match.group(1)
 
-        lines = [line for line in cleaned.splitlines() if line.strip()]
-        if not lines:
-            return original_line
+        # Remove any remaining stray fence lines
+        lines = []
+        for line in cleaned.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                continue
+            lines.append(line)
 
-        indent_match = re.match(r"^\s*", original_line)
-        indent = indent_match.group(0) if indent_match else ""
-        sanitized_line = indent + lines[0].lstrip()
-        if not sanitized_line.endswith("\n"):
-            sanitized_line += "\n"
-        return sanitized_line
+        result = "\n".join(lines)
+        if not result.endswith("\n"):
+            result += "\n"
+
+        # Sanity check: if the result has no def/class/import it's probably garbage
+        if not any(kw in result for kw in ["def ", "class ", "import ", "return ", "="]):
+            print("[WARN] LLM output looks empty/invalid, keeping original file")
+            return original_content
+
+        return result
     
     def check_repo_ownership(self, repo_url: str) -> Tuple[bool, Optional[str]]:
         """Check if repo is owned by the authenticated user.
@@ -689,7 +711,7 @@ All changes have been automatically tested and verified. Please review the commi
         return "LOGIC"
     
     def fix_code_node(self, state: AgentState) -> AgentState:
-        """Use Groq LLM to generate fixes for each failure."""
+        """Use Groq LLM to fix each failing file by rewriting the entire file."""
         try:
             state["timeline"].append({
                 "stage": "Generate Fixes",
@@ -697,86 +719,90 @@ All changes have been automatically tested and verified. Please review the commi
                 "status": "started",
                 "timestamp": datetime.now().isoformat()
             })
-            
+
             fixes = []
             repo_path = Path(state["repo_path"])
             state["fix_round"] = state.get("fix_round", 0) + 1
-            
+
+            # Group failures by file so we fix each file once with all its bugs in one LLM call
+            files_to_fix: Dict[str, List[Dict]] = {}
             for failure in state["failures"]:
+                fname = failure["file"]
+                files_to_fix.setdefault(fname, []).append(failure)
+
+            for fname, file_failures in files_to_fix.items():
                 try:
-                    file_path = repo_path / failure["file"]
-                    line_num = failure["line_number"]
-                    bug_type = failure["bug_type"]
-                    
+                    file_path = repo_path / fname
                     if not file_path.exists():
+                        print(f"[WARN] File not found: {file_path}")
                         continue
-                    
-                    # Read the file
-                    with open(file_path, 'r') as f:
-                        lines = f.readlines()
 
-                    if line_num <= 0 or line_num > len(lines):
-                        print(f"Skipping fix for {failure['file']}: invalid line {line_num}")
-                        continue
-                    
-                    # Get context around the error
-                    start = max(0, line_num - 5)
-                    end = min(len(lines), line_num + 5)
-                    context = "".join(lines[start:end])
-                    
-                    # Generate prompt for LLM
-                    prompt = f"""Fix the {bug_type} bug in this Python code. The error is on line {line_num}.
-Error: {failure['error_message']}
+                    with open(file_path, 'r', errors='replace') as f:
+                        original_content = f.read()
 
-Code context:
+                    # Build a description of all bugs in this file
+                    bug_descriptions = "\n".join(
+                        f"  - Line {b['line_number']}: [{b['bug_type']}] {b['error_message']}"
+                        for b in file_failures
+                    )
+
+                    prompt = f"""You are an expert Python developer. Fix ALL bugs listed below in the Python file.
+
+File: {fname}
+
+Bugs to fix:
+{bug_descriptions}
+
+Original file content:
 ```python
-{context}
+{original_content}
 ```
 
-Provide only the corrected single line of Python code for line {line_num}. Do not include markdown fences or explanations."""
-                    
-                    # Get fix from LLM
-                    fixed_code = self._invoke_llm(prompt)
-                    fixed_code = self._clean_llm_snippet(fixed_code, lines[line_num - 1])
-                    
-                    # Apply fix
-                    lines[line_num - 1] = fixed_code
-                    
-                    # Write back to file
+Rules:
+1. Return ONLY the complete corrected Python file content.
+2. Do NOT include any markdown fences (no ```, no ```python).
+3. Do NOT include any explanations, comments about changes, or extra text.
+4. Preserve all correct code exactly; only fix the listed bugs.
+5. Output must be valid Python that can be saved directly to a .py file."""
+
+                    fixed_content = self._invoke_llm(prompt)
+                    fixed_content = self._clean_full_file(fixed_content, original_content)
+
+                    # Write corrected file
                     with open(file_path, 'w') as f:
-                        f.writelines(lines)
-                    
-                    fix_record = {
-                        "file": failure["file"],
-                        "bug_type": bug_type,
-                        "line_number": line_num,
-                        "commit_message": f"[AI-AGENT] Fix {bug_type} in {failure['file']} line {line_num}",
-                        "status": "Fixed"
-                    }
-                    fixes.append(fix_record)
-                    print(f"Fixed {bug_type} in {failure['file']} line {line_num}")
-                
+                        f.write(fixed_content)
+
+                    print(f"[FIX] Rewrote {fname} fixing {len(file_failures)} bug(s)")
+
+                    for b in file_failures:
+                        fix_record = {
+                            "file": fname,
+                            "bug_type": b["bug_type"],
+                            "line_number": b["line_number"],
+                            "commit_message": f"[AI-AGENT] Fix {b['bug_type']} in {fname} line {b['line_number']}",
+                            "status": "Fixed"
+                        }
+                        fixes.append(fix_record)
+
                 except Exception as e:
-                    print(f"Error fixing {failure['file']}: {e}")
-                    # Continue to next fix on error
+                    print(f"[ERROR] Fixing {fname}: {e}")
                     continue
-            
+
             state["fixes"] = fixes
             state["total_fixes"] = len(fixes)
-            
+
             state["timeline"].append({
                 "stage": "Generate Fixes",
-                "description": f"Generated {len(fixes)} fixes",
+                "description": f"Generated {len(fixes)} fixes across {len(files_to_fix)} file(s)",
                 "status": "completed",
                 "timestamp": datetime.now().isoformat()
             })
-        
+
         except Exception as e:
-            # Gracefully handle errors and continue
-            print(f"Error in fix_code_node: {e}")
+            print(f"[ERROR] fix_code_node: {e}")
             state["fixes"] = []
             state["total_fixes"] = 0
-        
+
         return state
     
     def commit_push_node(self, state: AgentState) -> AgentState:
@@ -792,17 +818,24 @@ Provide only the corrected single line of Python code for line {line_num}. Do no
             repo_path = Path(state["repo_path"])
             repo = git.Repo(str(repo_path))
             
-            # Create branch name
-            branch_name = f"{state['team_name']}_{state['team_leader']}_AI_Fix"
+            # Create branch name (uppercase + underscores per PS spec)
+            raw_name = f"{state['team_name']}_{state['team_leader']}_AI_Fix"
+            branch_name = re.sub(r'[^A-Za-z0-9_]', '_', raw_name).upper().replace('__', '_')
             state["branch_name"] = branch_name
-            
+
+            # Always start fresh: delete local branch if it exists, then recreate from HEAD
             try:
-                # Create and checkout new branch
+                if branch_name in [h.name for h in repo.heads]:
+                    # Force-delete the old local branch
+                    repo.delete_head(branch_name, force=True)
                 repo.create_head(branch_name)
                 repo.heads[branch_name].checkout()
-            except:
-                # Branch may already exist
-                repo.heads[branch_name].checkout()
+            except Exception as branch_err:
+                print(f"[WARN] Branch handling: {branch_err}")
+                try:
+                    repo.heads[branch_name].checkout()
+                except Exception:
+                    pass
             
             # Commit each fix
             commits = []

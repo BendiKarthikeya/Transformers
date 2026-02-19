@@ -36,7 +36,7 @@ Autonomous CI/CD healing agent that clones a repo, runs tests, diagnoses failure
 │  │  2. Discover Tests (pytest, pyflakes)                   │  │
 │  │  3. Run Tests (detect failures)                         │  │
 │  │  4. Analyze Failures (bug classification)               │  │
-│  │  5. Fix Code (Groq LLM, OpenRouter fallback)            │  │
+│  │  5. Fix Code (Groq LLM, Gemini fallback)                │  │
 │  │  6. Commit & Push (git operations)                      │  │
 │  │  7. Verify Fixes (re-run tests, max 5 iterations)       │  │
 │  │  8. Calculate Score (efficiency + success metrics)      │  │
@@ -66,7 +66,7 @@ Autonomous CI/CD healing agent that clones a repo, runs tests, diagnoses failure
 2. Node.js 18+
 3. Git
 4. GitHub Personal Access Token
-5. Groq API key (OpenRouter optional)
+5. Groq API key (Gemini optional)
 
 ## Configuration
 Create .env files:
@@ -75,8 +75,8 @@ backend/.env
 ```
 GROQ_API_KEY=your_groq_key
 GROQ_MODEL=llama-3.3-70b-versatile
-OPENROUTER_API_KEY=
-OPENROUTER_MODEL=openrouter/auto
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-1.5-flash
 GITHUB_TOKEN=your_github_token
 PORT=8000
 ```
