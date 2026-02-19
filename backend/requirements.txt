@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-dotenv
+gitpython
+requests
+langchain
+langchain-community
+langgraph
+groq
+langchain-groq
+pytest
+pyflakes
+black
+subprocess32
+PyGithub>=2.1.1

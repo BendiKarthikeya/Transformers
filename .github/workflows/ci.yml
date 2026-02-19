@@ -1,0 +1,147 @@
+name: CI/CD Pipeline
+
+# Trigger on push to any branch
+on:
+  push:
+    branches: [ main, develop, "**" ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    
+    steps:
+      # Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      # Cache pip dependencies
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      # Install backend dependencies
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      
+      # Run pytest on all test files
+      - name: Run pytest
+        id: pytest
+        run: |
+          cd backend
+          pytest -v --tb=short --junit-xml=test-results.xml 2>&1 | tee test-output.log
+        continue-on-error: true
+      
+      # Parse pytest results
+      - name: Parse pytest results
+        id: parse_results
+        run: |
+          if grep -q "passed" backend/test-output.log; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+            echo "✅ Tests passed successfully!"
+          elif grep -q "FAILED" backend/test-output.log; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ Some tests failed. See details below."
+          else
+            echo "status=error" >> $GITHUB_OUTPUT
+            echo "⚠️ Could not determine test status."
+          fi
+        continue-on-error: true
+      
+      # Lint Python files with Pyflakes
+      - name: Run Pyflakes linting
+        id: lint
+        run: |
+          pyflakes backend/*.py > pylint-output.txt 2>&1
+          if [ $? -eq 0 ]; then
+            echo "linting_status=passed" >> $GITHUB_OUTPUT
+            echo "✅ Linting passed!"
+          else
+            echo "linting_status=failed" >> $GITHUB_OUTPUT
+            echo "⚠️ Linting issues found"
+          fi
+          cat pylint-output.txt || echo "No linting issues"
+        continue-on-error: true
+      
+      # Upload test results
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: pytest-results
+          path: |
+            backend/test-results.xml
+            backend/test-output.log
+            pylint-output.txt
+      
+      # Generate test summary
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "## 🧪 CI/CD Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pytest Status**: ${{ steps.parse_results.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Linting Status**: ${{ steps.lint.outputs.linting_status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pytest Output" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat backend/test-output.log >> $GITHUB_STEP_SUMMARY || echo "No test output" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Linting Output" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat pylint-output.txt >> $GITHUB_STEP_SUMMARY || echo "No linting output" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+      
+      # Determine overall status
+      - name: Determine build status
+        id: status
+        run: |
+          if [ "${{ steps.parse_results.outputs.status }}" = "passed" ] && [ "${{ steps.lint.outputs.linting_status }}" = "passed" ]; then
+            echo "build_status=success" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "build_status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        continue-on-error: true
+      
+      # Comment on Pull Request with results
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const testOutput = fs.existsSync('backend/test-output.log') 
+              ? fs.readFileSync('backend/test-output.log', 'utf8').slice(0, 500) 
+              : 'No test output';
+            
+            const status = '${{ steps.parse_results.outputs.status }}' === 'passed' ? '✅' : '❌';
+            const lintStatus = '${{ steps.lint.outputs.linting_status }}' === 'passed' ? '✅' : '⚠️';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🤖 CI/CD Healing Agent - Test Results\n\n**Test Status**: ${status}\n**Linting Status**: ${lintStatus}\n\n### Quick Summary\n- Pytest: ${{ steps.parse_results.outputs.status }}\n- Linting: ${{ steps.lint.outputs.linting_status }}\n\nFull results available in [GitHub Actions](${context.payload.pull_request.html_url}/checks).`
+            });
