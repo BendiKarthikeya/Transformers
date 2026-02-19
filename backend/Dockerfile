@@ -2,12 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies: git, build tools, and other utilities
+# Install system dependencies: git, build tools, nodejs, and other utilities
 RUN apt-get update && apt-get install -y \
     git \
     build-essential \
     curl \
     wget \
+    && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directories for repos and results

@@ -1,5 +1,14 @@
 """Autonomous CI/CD Healing Agent with LangGraph multi-agent pipeline."""
 
+from dotenv import load_dotenv
+from pathlib import Path as _Path
+
+# Load from backend/.env first, then fall back to root .env
+_backend_env = _Path(__file__).parent / ".env"
+_root_env = _Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=_backend_env)
+load_dotenv(dotenv_path=_root_env, override=False)  # don't override backend/.env values
+
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Optional, Dict, Any, Tuple
@@ -41,6 +50,7 @@ class AgentState(TypedDict):
     pr_url: Optional[str]
     is_fork: bool
     fix_round: int
+    project_type: str
 
 
 class HealingAgent:
@@ -49,7 +59,7 @@ class HealingAgent:
     def __init__(self):
         """Initialize the healing agent."""
         self.llm = None  # Lazy load on first use
-        self.github_token = os.getenv("GITHUB_TOKEN")
+        self.github_token = os.getenv("GITHUB_CLASSICS") or os.getenv("GITHUB_TOKEN")
         self.repo_base = Path(__file__).parent / "repos"
         self.repo_base.mkdir(exist_ok=True)
         self.retry_limit = 5
@@ -101,6 +111,40 @@ class HealingAgent:
             print(f"Error parsing Gemini response: {data}")
             raise e
 
+    def _invoke_openrouter(self, prompt: str) -> str:
+        api_key = os.getenv("OPEN_ROUTER_API") or os.getenv("OPENROUTER_API_KEY") # handle with or without space/different names
+        if not api_key:
+            # specifically for the user's var OPEN_ROUTER_API that might have space before equals in .env
+            api_key = os.getenv("OPEN_ROUTER_API ")
+            if not api_key:
+                raise RuntimeError("OPEN_ROUTER_API is not set")
+        
+        # Strip just in case
+        api_key = api_key.strip()
+
+        model_name = os.getenv("OPENROUTER_MODEL") or "deepseek/deepseek-chat:free"
+        
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as e:
+            print(f"Error parsing OpenRouter response: {data}")
+            raise e
+
     def _invoke_llm(self, prompt: str) -> str:
         try:
             return self._invoke_gemini(prompt)
@@ -110,7 +154,11 @@ class HealingAgent:
                 message = self.get_llm().invoke(prompt)
                 return message.content
             except Exception as e2:
-                raise RuntimeError(f"Both Gemini and Groq failed: {e2}")
+                print(f"Groq LLM failed, falling back to OpenRouter: {e2}")
+                try:
+                    return self._invoke_openrouter(prompt)
+                except Exception as e3:
+                    raise RuntimeError(f"Gemini, Groq, and OpenRouter all failed. Last error: {e3}")
 
     def _clean_full_file(self, text: str, original_content: str) -> str:
         """Strip ALL markdown artifacts from an LLM-returned file and return clean Python."""
@@ -304,89 +352,109 @@ All changes have been automatically tested and verified. Please review the commi
         return workflow.compile()
     
     def clone_repo_node(self, state: AgentState) -> AgentState:
-        """Clone the GitHub repository into backend/repos/ folder.
-        
-        If repo is not owned by the authenticated user:
-        - Fork the repository
-        - Clone from the fork
-        - Track for PR creation later
-        """
+        """Clone the GitHub repository. Uses token auth always. Only forks if not owned."""
+        import shutil
+
         try:
+            repo_url = state["repo_url"].rstrip("/").replace(".git", "")
+            parts = repo_url.split("/")
+            repo_owner = parts[-2]
+            repo_name = parts[-1]
+
+            # ── Determine ownership by comparing URL owner with token user ──
+            is_owned = False
+            try:
+                if self.github_token:
+                    g = Github(self.github_token)
+                    me = g.get_user().login
+                    is_owned = me.lower() == repo_owner.lower()
+                    print(f"Authenticated as {me}, repo owner is {repo_owner}, is_owned={is_owned}")
+            except Exception as e:
+                print(f"[WARN] Could not verify ownership via API: {e}. Assuming owned (will try direct clone).")
+                is_owned = True  # safer default — try direct clone first
+
             state["timeline"].append({
                 "stage": "Check Repository Ownership",
-                "description": f"Checking if repo is owned by authenticated user",
-                "status": "started",
-                "timestamp": datetime.now().isoformat()
-            })
-            
-            # Check if repo is owned by authenticated user
-            is_owned, owner = self.check_repo_ownership(state["repo_url"])
-            
-            if is_owned:
-                state["is_fork"] = False
-                state["original_repo_url"] = None
-                clone_url = state["repo_url"]
-                print(f"✅ Repository is owned by authenticated user")
-            else:
-                state["is_fork"] = True
-                state["original_repo_url"] = state["repo_url"]
-                
-                state["timeline"].append({
-                    "stage": "Fork Repository",
-                    "description": f"Creating fork (repo owned by {owner})",
-                    "status": "started",
-                    "timestamp": datetime.now().isoformat()
-                })
-                
-                # Fork the repository
-                fork_url = self.fork_repository(state["repo_url"])
-                if not fork_url:
-                    raise Exception("Failed to fork repository")
-                
-                state["fork_url"] = fork_url
-                clone_url = fork_url
-                
-                state["timeline"].append({
-                    "stage": "Fork Repository",
-                    "description": f"Successfully forked to {fork_url}",
-                    "status": "completed",
-                    "timestamp": datetime.now().isoformat()
-                })
-            
-            state["timeline"].append({
-                "stage": "Clone Repository",
-                "description": f"Cloning {clone_url}",
-                "status": "started",
-                "timestamp": datetime.now().isoformat()
-            })
-            
-            # Extract repo name from URL
-            repo_name = state["repo_url"].split("/")[-1].replace(".git", "")
-            repo_path = self.repo_base / repo_name
-            
-            # Clean up existing repo
-            if repo_path.exists():
-                import shutil
-                shutil.rmtree(repo_path, ignore_errors=True)
-                if repo_path.exists():
-                    raise Exception(f"Cannot remove existing repo at {repo_path}")
-            
-            # Clone repository
-            print(f"Cloning repository: {clone_url}")
-            git.Repo.clone_from(clone_url, str(repo_path))
-            
-            state["repo_path"] = str(repo_path)
-            state["timeline"].append({
-                "stage": "Clone Repository",
-                "description": f"Successfully cloned to {repo_path}",
+                "description": f"Repo owner: {repo_owner} | Owned by you: {is_owned}",
                 "status": "completed",
                 "timestamp": datetime.now().isoformat()
             })
+
+            # ── Build authenticated clone URL ──
+            if self.github_token:
+                auth_clone_url = f"https://{self.github_token}@github.com/{repo_owner}/{repo_name}.git"
+            else:
+                auth_clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
+
+            if not is_owned:
+                # Fork the repo so we can push a branch to it
+                state["timeline"].append({
+                    "stage": "Fork Repository",
+                    "description": f"Forking {repo_owner}/{repo_name} to your account",
+                    "status": "started",
+                    "timestamp": datetime.now().isoformat()
+                })
+                fork_url = self.fork_repository(state["repo_url"])
+                if not fork_url:
+                    raise Exception("Failed to fork repository — check GITHUB_TOKEN permissions (needs repo + workflow scope)")
+                state["is_fork"] = True
+                state["original_repo_url"] = state["repo_url"]
+                state["fork_url"] = fork_url
+
+                # Build authenticated URL for the fork
+                fork_parts = fork_url.rstrip("/").replace(".git", "").split("/")
+                fork_owner = fork_parts[-2]
+                fork_repo = fork_parts[-1]
+                if self.github_token:
+                    auth_clone_url = f"https://{self.github_token}@github.com/{fork_owner}/{fork_repo}.git"
+                else:
+                    auth_clone_url = fork_url
+                import time as _time; _time.sleep(3)  # wait for fork to propagate
+
+                state["timeline"].append({
+                    "stage": "Fork Repository",
+                    "description": f"Forked to {fork_url}",
+                    "status": "completed",
+                    "timestamp": datetime.now().isoformat()
+                })
+            else:
+                state["is_fork"] = False
+                state["original_repo_url"] = None
+
+            # ── Clone ──
+            repo_path = self.repo_base / repo_name
+            if repo_path.exists():
+                shutil.rmtree(repo_path, ignore_errors=False)
+
+            state["timeline"].append({
+                "stage": "Clone Repository",
+                "description": f"Cloning {repo_owner}/{repo_name}",
+                "status": "started",
+                "timestamp": datetime.now().isoformat()
+            })
+
+            print(f"Cloning with auth: {repo_owner}/{repo_name}")
+            git.Repo.clone_from(auth_clone_url, str(repo_path))
+
+            state["repo_path"] = str(repo_path)
+            state["timeline"].append({
+                "stage": "Clone Repository",
+                "description": f"Cloned to {repo_path}",
+                "status": "completed",
+                "timestamp": datetime.now().isoformat()
+            })
+
         except Exception as e:
-            state["error"] = f"Failed to clone repo: {str(e)}"
+            state["error"] = f"Clone failed: {str(e)}"
             state["ci_status"] = "failed"
-            print(f"Error cloning repo: {e}")
-        
+            state["timeline"].append({
+                "stage": "Clone Repository",
+                "description": f"ERROR: {str(e)}",
+                "status": "failed",
+                "timestamp": datetime.now().isoformat()
+            })
+            print(f"[ERROR] clone_repo_node: {e}")
+
         return state
     
     def discover_tests_node(self, state: AgentState) -> AgentState:
@@ -406,40 +474,49 @@ All changes have been automatically tested and verified. Please review the commi
             if not repo_path.exists():
                 raise Exception(f"Repository path not found: {repo_path}")
 
+            # Check project type
+            state["project_type"] = "node" if (repo_path / "package.json").exists() else "python"
+
             test_files = []
-            all_py_files = []
-            skip_dirs = {"venv", ".venv", "__pycache__", ".git", "site-packages"}
+            all_src_files = []
+            skip_dirs = {"venv", ".venv", "__pycache__", ".git", "site-packages", "node_modules"}
             
             # Walk through all files
-            for file_path in repo_path.rglob("*.py"):
-                # Skip hidden directories and .git
-                if any(part in skip_dirs for part in file_path.parts):
+            for file_path in repo_path.rglob("*.*"):
+                if file_path.suffix not in [".py", ".js", ".ts"]:
+                    continue
+                # Skip hidden directories and ignored folders
+                if any(part in skip_dirs or part.startswith(".") for part in file_path.parts):
                     continue
                 
                 rel_path = str(file_path.relative_to(repo_path))
-                all_py_files.append(rel_path)
+                all_src_files.append(rel_path)
                 
                 # Check if it's a test file
-                file_name = file_path.name
-                if (
-                    file_name.startswith("test_")
-                    or file_name.endswith("_test.py")
-                    or "tests" in file_path.parts
-                ):
+                file_name = file_path.name.lower()
+                is_test = False
+                if state["project_type"] == "python":
+                    if file_name.startswith("test_") or file_name.endswith("_test.py") or "tests/" in rel_path.lower():
+                        is_test = True
+                else:
+                    if ".test." in file_name or ".spec." in file_name or "tests/" in rel_path.lower() or "__tests__/" in rel_path.lower():
+                        is_test = True
+
+                if is_test:
                     test_files.append(rel_path)
             
             state["test_files"] = test_files
-            state["all_py_files"] = all_py_files
+            state["all_py_files"] = all_src_files
             
             state["timeline"].append({
                 "stage": "Discover Tests",
-                "description": f"Found {len(test_files)} test files and {len(all_py_files)} Python files",
+                "description": f"Found {len(test_files)} test files and {len(all_src_files)} src files",
                 "status": "completed",
                 "timestamp": datetime.now().isoformat()
             })
             
             print(f"Found {len(test_files)} test files: {test_files}")
-            print(f"Found {len(all_py_files)} Python files")
+            print(f"Found {len(all_src_files)} Src files")
         except Exception as e:
             state["error"] = f"Failed to discover tests: {str(e)}"
             state["ci_status"] = "failed"
@@ -468,24 +545,66 @@ All changes have been automatically tested and verified. Please review the commi
                 state["total_failures"] = 0
                 return state
             
-            # Run pytest
+            # Run tests
             repo_path = Path(state["repo_path"])
-            test_file_paths = [str(repo_path / f) for f in state["test_files"]]
+            abs_repo_path = str(repo_path.absolute())
             
-            result = subprocess.run(
-                ["pytest", "-v", "--tb=short"] + test_file_paths,
-                cwd=str(repo_path),
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
+            use_docker = os.getenv("USE_DOCKER", "true").lower() == "true"
             
-            state["pytest_output"] = result.stdout + "\\n" + result.stderr
+            if state.get("project_type") == "node":
+                if use_docker:
+                    print(f"Running npm install and tests using Docker...")
+                    result = subprocess.run(
+                        [
+                            "docker", "run", "--rm",
+                            "-v", f"{abs_repo_path}:/app",
+                            "-w", "/app",
+                            "node:18",
+                            "sh", "-c", "npm install && npm test"
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                else:
+                    print(f"Running npm install and tests locally (Azure Mode)...")
+                    subprocess.run(["npm", "install"], cwd=str(repo_path), capture_output=True, timeout=180)
+                    result = subprocess.run(["npm", "test"], cwd=str(repo_path), capture_output=True, text=True, timeout=180)
+            else:
+                if use_docker:
+                    print(f"Running pytest using Docker...")
+                    result = subprocess.run(
+                        [
+                            "docker", "run", "--rm",
+                            "-v", f"{abs_repo_path}:/app",
+                            "-w", "/app",
+                            "python:3.10",
+                            "sh", "-c",
+                            "pip install pytest && (if [ -f requirements.txt ]; then pip install -r requirements.txt; fi) && pytest -v --tb=long " + " ".join(state["test_files"])
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                else:
+                    print(f"Running pytest locally (Azure Mode)...")
+                    test_file_paths = [str(repo_path / f) for f in state["test_files"]]
+                    result = subprocess.run(["pytest", "-v", "--tb=long"] + test_file_paths, cwd=str(repo_path), capture_output=True, text=True, timeout=120)
+
+            state["pytest_output"] = result.stdout + "\n" + result.stderr
             
             # Count failures and collection errors
-            failed_count = len(re.findall(r"^FAILED\s", state["pytest_output"], re.MULTILINE))
-            error_count = len(re.findall(r"ERROR\s+collecting\s", state["pytest_output"]))
-            state["total_failures"] = failed_count + error_count
+            if state.get("project_type") == "node":
+                # For Node.js, count failures using simple keywords or returncode
+                failures_jest = len(re.findall(r"FAIL\s", state["pytest_output"]))
+                failures_mocha = len(re.findall(r"failing\s", state["pytest_output"], re.IGNORECASE))
+                state["total_failures"] = max(failures_jest, failures_mocha)
+                if state["total_failures"] == 0 and result.returncode != 0:
+                    state["total_failures"] = 1  # At least 1 failure if tests crashed
+            else:
+                failed_count = len(re.findall(r"^FAILED\s", state["pytest_output"], re.MULTILINE))
+                error_count = len(re.findall(r"ERROR\s+collecting\s", state["pytest_output"]))
+                state["total_failures"] = failed_count + error_count
             
             state["timeline"].append({
                 "stage": "Run Tests",
@@ -503,7 +622,7 @@ All changes have been automatically tested and verified. Please review the commi
         return state
     
     def analyze_failures_node(self, state: AgentState) -> AgentState:
-        """Parse pytest output, identify failures with file name, line number, bug type."""
+        """Parse pytest --tb=long output and map failures to source files."""
         try:
             state["timeline"].append({
                 "stage": "Analyze Failures",
@@ -511,165 +630,207 @@ All changes have been automatically tested and verified. Please review the commi
                 "status": "started",
                 "timestamp": datetime.now().isoformat()
             })
-            
+
             failures = []
             pytest_output = state["pytest_output"]
-            
-            # Parse FAILED lines
-            failed_pattern = r"FAILED\\s+([^\\s]+)\\s+-\\s+(.*)"
-            for match in re.finditer(failed_pattern, pytest_output):
-                test_path = match.group(1)
-                error_msg = match.group(2)
-                
-                # Extract file and line number
-                file_match = re.search(r"([^:]+):(\\d+)", test_path)
-                if file_match:
-                    file_name = file_match.group(1)
-                    line_num = int(file_match.group(2))
-                else:
-                    file_name = test_path
-                    line_num = 0
-                
-                # Determine bug type
-                bug_type = self._detect_bug_type(error_msg, file_name, state["repo_path"])
-                
+            repo_root = Path(state["repo_path"]).resolve()
+
+            if state.get("project_type") == "node" and state.get("total_failures", 0) > 0:
+                print("Using LLM to extract Node test failures...")
+                prompt = f"""You are a dev tool extracting errors from Node test outputs.
+Analyze this test output and extract the failures.
+Output ONLY a valid JSON array of objects.
+Each object MUST have these EXACT keys:
+- "file": The path to the source file that caused the failure (NOT the test file). Try your best to find the source file causing the bug, e.g. "src/utils.js".
+- "line_number": The exact line number in the source file, or 1 if unknown.
+- "error_message": A brief description of the failure.
+- "bug_type": "LOGIC", "SYNTAX", "TYPE_ERROR", or "IMPORT".
+
+Test output:
+{pytest_output[:8000]}
+"""
+                try:
+                    llm_response = self._invoke_llm(prompt)
+                    json_text = llm_response.strip()
+                    if json_text.startswith("```json"):
+                        json_text = json_text[7:-3]
+                    elif json_text.startswith("```"):
+                        json_text = json_text[3:-3]
+                    failures = json.loads(json_text.strip())
+                except Exception as e:
+                    print(f"Failed to parse Node test output with LLM: {e}")
+                    failures = []
+                blocks = []
+            elif state.get("project_type") != "node":
+                # Split pytest output into per-test failure blocks
+                blocks = re.split(r"_{5,}\s+\S.*?\s+_{5,}", pytest_output)
+            else:
+                blocks = []
+
+            # Also grab the FAILED summary lines to collect test→msg mappings
+            # Format: FAILED tests/test_foo.py::test_bar - some message
+            failed_summary = {}
+            for m in re.finditer(r"^FAILED\s+(\S+)\s+-\s+(.*)", pytest_output, re.MULTILINE):
+                failed_summary[m.group(1)] = m.group(2).strip()
+
+            for block in blocks:
+                if not block.strip():
+                    continue
+
+                # Try to find source file frames (not test files) in this block
+                # --tb=long gives: `    frame_path.py:lineN: in func_name`
+                source_frames = []
+                last_error = ""
+
+                for line in block.splitlines():
+                    # Capture E-prefixed error lines
+                    e_match = re.match(r"^E\s+(.*)", line)
+                    if e_match:
+                        last_error = e_match.group(1).strip()
+                        continue
+
+                    # Frame lines: look like `    path/to/file.py:42: in function_name`
+                    frame_match = re.match(r"^\s+(.+\.py):(\d+):\s+in\s+", line)
+                    if frame_match:
+                        fpath_str = frame_match.group(1)
+                        fline = int(frame_match.group(2))
+                        fpath = Path(fpath_str)
+                        if not fpath.is_absolute():
+                            fpath = repo_root / fpath
+                        try:
+                            rel = fpath.resolve().relative_to(repo_root)
+                            # Skip test files — we want source files
+                            if "test" not in str(rel).lower():
+                                source_frames.append((str(rel), fline))
+                        except Exception:
+                            pass
+
+                if not source_frames:
+                    # No source frame found — fall back: find a FAILED line
+                    # and map the test file path → try to guess source file
+                    for test_path, err_msg in failed_summary.items():
+                        # test path like tests/test_math_utils.py::test_square
+                        test_file = test_path.split("::")[0]
+                        source_name = re.sub(r"tests?[/\\]", "", test_file)
+                        source_name = re.sub(r"test_", "", source_name)
+                        source_name = "src/" + source_name  # heuristic: src/<name>.py
+                        source_path = repo_root / source_name
+                        if source_path.exists():
+                            bug_type = self._detect_bug_type(err_msg, source_name, state["repo_path"])
+                            failure = {
+                                "file": source_name,
+                                "line_number": 1,
+                                "error_message": err_msg,
+                                "bug_type": "LOGIC"
+                            }
+                            if failure not in failures:
+                                failures.append(failure)
+                    continue
+
+                # Use the last source frame (closest to the actual bug)
+                src_file, src_line = source_frames[-1]
+                error_msg = last_error or "Assertion/logic error"
+                bug_type = self._detect_bug_type(error_msg, src_file, state["repo_path"])
+
                 failure = {
-                    "file": file_name,
-                    "line_number": line_num,
+                    "file": src_file,
+                    "line_number": src_line,
                     "error_message": error_msg,
                     "bug_type": bug_type
                 }
-                failures.append(failure)
-            
-            # Parse collection/import/syntax errors without FAILED lines
-            current_file = None
-            current_line = None
-            current_error = None
+                if failure not in failures:
+                    failures.append(failure)
 
-            repo_root = Path(state["repo_path"]).resolve()
-
-            for line in pytest_output.splitlines():
-                if "ERROR collecting" in line:
-                    if current_file and current_error:
-                        failures.append({
-                            "file": current_file,
-                            "line_number": current_line or 0,
-                            "error_message": current_error,
-                            "bug_type": self._detect_bug_type(current_error, current_file, state["repo_path"])
-                        })
-                    current_file = None
-                    current_line = None
-                    current_error = None
-
-                file_match = re.search(r"File \"([^\"]+)\", line (\d+)", line)
-                if file_match:
-                    file_path = Path(file_match.group(1)).resolve()
-                    try:
-                        relative_path = file_path.relative_to(repo_root)
-                    except Exception:
-                        continue
-
-                    if current_file and current_error:
-                        failures.append({
-                            "file": current_file,
-                            "line_number": current_line or 0,
-                            "error_message": current_error,
-                            "bug_type": self._detect_bug_type(current_error, current_file, state["repo_path"])
-                        })
-
-                    current_file = str(relative_path)
-                    current_line = int(file_match.group(2))
-                    current_error = None
+            # ── Collection/syntax errors (ERROR collecting tests/foo.py) ──
+            # These happen because a SOURCE file has a SyntaxError.
+            # Parse the full traceback block to find the actual broken source file.
+            lines_list = pytest_output.splitlines()
+            for i, line in enumerate(lines_list):
+                if "ERROR collecting" not in line:
                     continue
+                # Scan forward through the traceback for the real source file
+                src_file_for_error = None
+                src_line_for_error = 1
+                for j in range(i + 1, min(i + 50, len(lines_list))):
+                    tbl = lines_list[j]
+                    # Look for: File "src/calculator.py", line N
+                    fm = re.search(r'File ["\'](.+\.py)["\'], line (\d+)', tbl)
+                    if fm:
+                        fpath = Path(fm.group(1))
+                        if not fpath.is_absolute():
+                            fpath = repo_root / fpath
+                        try:
+                            rel = fpath.resolve().relative_to(repo_root)
+                            # Prefer source files over test files
+                            if "test" not in str(rel).lower():
+                                src_file_for_error = str(rel)
+                                src_line_for_error = int(fm.group(2))
+                        except Exception:
+                            pass
+                    # Also match: src/calculator.py:4: SyntaxError
+                    alt = re.match(r"\s*(.+\.py):(\d+):", tbl)
+                    if alt:
+                        fpath = Path(alt.group(1))
+                        if not fpath.is_absolute():
+                            fpath = repo_root / fpath
+                        try:
+                            rel = fpath.resolve().relative_to(repo_root)
+                            if "test" not in str(rel).lower():
+                                src_file_for_error = str(rel)
+                                src_line_for_error = int(alt.group(2))
+                        except Exception:
+                            pass
+                    # Stop at next section separator
+                    if re.match(r"[=_]{5,}", tbl.strip()):
+                        break
 
-                alt_match = re.search(r"^\s*([^\s:]+\.py):(\d+):", line)
-                if alt_match:
-                    alt_path = alt_match.group(1)
-                    alt_line = int(alt_match.group(2))
-                    alt_full_path = Path(alt_path)
-                    if not alt_full_path.is_absolute():
-                        alt_full_path = repo_root / alt_full_path
-                    try:
-                        relative_path = alt_full_path.resolve().relative_to(repo_root)
-                        current_file = str(relative_path)
-                        current_line = alt_line
-                    except Exception:
-                        pass
+                # Fallback: extract from ERROR collecting line itself and map test→src
+                if not src_file_for_error:
+                    col_match = re.search(r"ERROR collecting (.+\.py)", line)
+                    if col_match:
+                        test_file = col_match.group(1).strip()
+                        candidate = re.sub(r"tests?[/\\]", "", test_file)
+                        candidate = re.sub(r"test_", "", candidate)
+                        candidate = "src/" + candidate
+                        if (repo_root / candidate).exists():
+                            src_file_for_error = candidate
 
-                if current_file:
-                    stripped = line.strip()
-                    if stripped.startswith("E"):
-                        error_text = stripped.lstrip("E").strip()
-                        if re.search(r"(Error|Exception|SyntaxError)", error_text):
-                            current_error = error_text
+                if src_file_for_error:
+                    failures.append({
+                        "file": src_file_for_error,
+                        "line_number": src_line_for_error,
+                        "error_message": "SyntaxError/ImportError in source file",
+                        "bug_type": "SYNTAX"
+                    })
 
-            if current_file and current_error:
-                failures.append({
-                    "file": current_file,
-                    "line_number": current_line or 0,
-                    "error_message": current_error,
-                    "bug_type": self._detect_bug_type(current_error, current_file, state["repo_path"])
-                })
-
-            # Parse assertion failures to map to source files (not tests)
-            last_error_line = ""
-            for line in pytest_output.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("E"):
-                    last_error_line = stripped.lstrip("E").strip()
-                elif "AssertionError" in stripped:
-                    last_error_line = stripped
-
-                frame_match = re.match(r"^\s*([^\s:]+\.py):(\d+):", line)
-                if not frame_match:
-                    continue
-
-                frame_path = frame_match.group(1)
-                frame_line = int(frame_match.group(2))
-                frame_full = Path(frame_path)
-                if not frame_full.is_absolute():
-                    frame_full = repo_root / frame_full
-
-                try:
-                    relative_path = frame_full.resolve().relative_to(repo_root)
-                except Exception:
-                    continue
-
-                if "tests" in relative_path.parts:
-                    continue
-
-                error_message = last_error_line or "Assertion failed"
-                failures.append({
-                    "file": str(relative_path),
-                    "line_number": frame_line,
-                    "error_message": error_message,
-                    "bug_type": self._detect_bug_type(error_message, str(relative_path), state["repo_path"])
-                })
-
-            # Deduplicate failures
-            deduped = []
-            for failure in failures:
-                if failure not in deduped:
-                    deduped.append(failure)
-            failures = deduped
+            if state.get("project_type") != "node":
+                # Deduplicate for pytest logic
+                seen = set()
+                deduped = []
+                for f in failures:
+                    key = (f["file"], f["line_number"])
+                    if key not in seen:
+                        seen.add(key)
+                        deduped.append(f)
+                failures = deduped
 
             state["failures"] = failures
-            
             state["timeline"].append({
                 "stage": "Analyze Failures",
                 "description": f"Identified {len(failures)} failures",
                 "status": "completed",
                 "timestamp": datetime.now().isoformat()
             })
-            
-            print(f"Failures identified: {failures}")
+            print(f"Failures: {failures}")
+
         except Exception as e:
             state["error"] = f"Failed to analyze failures: {str(e)}"
             state["ci_status"] = "failed"
             print(f"Error analyzing failures: {e}")
-        
+
         return state
-    
+
+
     def _detect_bug_type(self, error_msg: str, file_name: str, repo_path: str) -> str:
         """Detect bug type from error message and code analysis."""
         error_lower = error_msg.lower()
@@ -733,6 +894,12 @@ All changes have been automatically tested and verified. Please review the commi
             for fname, file_failures in files_to_fix.items():
                 try:
                     file_path = repo_path / fname
+
+                    # NEVER fix test files — only fix source files
+                    if "test" in fname.lower() or Path(fname).stem.startswith("test_"):
+                        print(f"[SKIP] Refusing to fix test file: {fname}")
+                        continue
+
                     if not file_path.exists():
                         print(f"[WARN] File not found: {file_path}")
                         continue
@@ -740,30 +907,67 @@ All changes have been automatically tested and verified. Please review the commi
                     with open(file_path, 'r', errors='replace') as f:
                         original_content = f.read()
 
-                    # Build a description of all bugs in this file
-                    bug_descriptions = "\n".join(
-                        f"  - Line {b['line_number']}: [{b['bug_type']}] {b['error_message']}"
-                        for b in file_failures
+                    # Add line numbers for context
+                    numbered_lines = "\n".join(
+                        f"{i+1:3}: {line}" for i, line in enumerate(original_content.splitlines())
                     )
 
-                    prompt = f"""You are an expert Python developer. Fix ALL bugs listed below in the Python file.
+                    # Find the matching test file to show expected behaviour
+                    test_hint = ""
+                    test_dir = repo_path / "tests"
+                    base = Path(fname).stem.replace("_utils", "").replace("src/", "").replace("src\\", "")
+                    for tf in (test_dir.glob(f"*{base}*") if test_dir.exists() else []):
+                        try:
+                            test_hint = "\n\nFailing test (shows expected behaviour):\n" + tf.read_text(errors="replace")
+                        except Exception:
+                            pass
+                        break
 
-File: {fname}
+                    # Build bug descriptions with explicit instructions
+                    bug_lines = []
+                    for b in file_failures:
+                        src_lines = original_content.splitlines()
+                        ln = b["line_number"]
+                        bug_type = b["bug_type"]
+                        err = b["error_message"]
 
-Bugs to fix:
+                        if ln > 1 and ln <= len(src_lines):
+                            line_content = src_lines[ln - 1].strip()
+                            bug_lines.append(
+                                f"  - Line {ln} (currently: `{line_content}`): [{bug_type}] {err}"
+                            )
+                        else:
+                            # Line unknown (LOGIC bug mapped via heuristic) — describe by error
+                            # e.g. "assert 6 == 9" means function returns 6 but must return 9
+                            bug_lines.append(
+                                f"  - LOGIC BUG: The file has a logic error causing: {err}"
+                                f" — find and fix the function that produces the wrong result."
+                            )
+                    bug_descriptions = "\n".join(bug_lines)
+
+                    prompt = f"""You are an expert Python developer. Your ONLY job is to fix bugs in Python code.
+
+TASK: Fix ALL bugs in file `{fname}` so that all tests pass.
+
+Known failures:
 {bug_descriptions}
+{test_hint}
 
-Original file content:
-```python
-{original_content}
-```
+Current file content (with line numbers):
+{numbered_lines}
 
-Rules:
-1. Return ONLY the complete corrected Python file content.
-2. Do NOT include any markdown fences (no ```, no ```python).
-3. Do NOT include any explanations, comments about changes, or extra text.
-4. Preserve all correct code exactly; only fix the listed bugs.
-5. Output must be valid Python that can be saved directly to a .py file."""
+MANDATORY RULES — violating any rule means your answer is WRONG:
+1. Output ONLY the complete corrected source code. Nothing else.
+2. Do NOT wrap in markdown code fences (no ```, no ```python, no ```javascript).
+3. Do NOT add any explanation text before or after the code.
+4. Fix the ACTUAL CODE — do NOT just add or edit comments. Change the wrong operations/expressions.
+5. Remove ALL # BUG or // BUG comments from the code.
+6. Every function MUST return mathematically correct results that match the tests.
+7. The output must be syntactically valid code.
+
+Example: if a test says `assert square(3) == 9` but square returns 6, the bug is `x+x` must be `x*x`.
+
+Output the fixed Python file now:"""
 
                     fixed_content = self._invoke_llm(prompt)
                     fixed_content = self._clean_full_file(fixed_content, original_content)
@@ -771,8 +975,7 @@ Rules:
                     # Write corrected file
                     with open(file_path, 'w') as f:
                         f.write(fixed_content)
-
-                    print(f"[FIX] Rewrote {fname} fixing {len(file_failures)} bug(s)")
+                    print(f"[FIX] Rewrote {fname} — wrote {len(fixed_content)} bytes")
 
                     for b in file_failures:
                         fix_record = {
@@ -826,6 +1029,9 @@ Rules:
             # Always start fresh: delete local branch if it exists, then recreate from HEAD
             try:
                 if branch_name in [h.name for h in repo.heads]:
+                    # Switch away from branch before deleting
+                    if str(repo.active_branch) == branch_name:
+                        repo.heads["main"].checkout() if "main" in [h.name for h in repo.heads] else repo.heads["master"].checkout()
                     # Force-delete the old local branch
                     repo.delete_head(branch_name, force=True)
                 repo.create_head(branch_name)
@@ -917,13 +1123,46 @@ Rules:
                         all_passed = True
                         break
                     
-                    result = subprocess.run(
-                        ["pytest", "-v", "--tb=short"] + test_file_paths,
-                        cwd=str(repo_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=120
-                    )
+                    abs_repo_path = str(repo_path.absolute())
+                    use_docker = os.getenv("USE_DOCKER", "true").lower() == "true"
+                    
+                    if state.get("project_type") == "node":
+                        if use_docker:
+                            print("Verifying npm test using Docker...")
+                            result = subprocess.run(
+                                [
+                                    "docker", "run", "--rm",
+                                    "-v", f"{abs_repo_path}:/app",
+                                    "-w", "/app",
+                                    "node:18",
+                                    "sh", "-c", "npm test"
+                                ],
+                                capture_output=True,
+                                text=True,
+                                timeout=240
+                            )
+                        else:
+                            print("Verifying npm test locally (Azure Mode)...")
+                            result = subprocess.run(["npm", "test"], cwd=str(repo_path), capture_output=True, text=True, timeout=120)
+                    else:
+                        if use_docker:
+                            print("Verifying pytest using Docker...")
+                            result = subprocess.run(
+                                [
+                                    "docker", "run", "--rm",
+                                    "-v", f"{abs_repo_path}:/app",
+                                    "-w", "/app",
+                                    "python:3.10",
+                                    "sh", "-c",
+                                    "pip install pytest && (if [ -f requirements.txt ]; then pip install -r requirements.txt; fi) && pytest -v --tb=short " + " ".join(state["test_files"])
+                                ],
+                                capture_output=True,
+                                text=True,
+                                timeout=240
+                            )
+                        else:
+                            print("Verifying pytest locally (Azure Mode)...")
+                            result = subprocess.run(["pytest", "-v", "--tb=short"] + test_file_paths, cwd=str(repo_path), capture_output=True, text=True, timeout=120)
                     
                     # Check if all tests passed
                     if result.returncode == 0:
@@ -1053,7 +1292,8 @@ Rules:
             fork_url=None,
             pr_url=None,
             is_fork=False,
-            fix_round=0
+            fix_round=0,
+            project_type="python"
         )
         
         # Run workflow
@@ -1068,7 +1308,11 @@ Rules:
             "ci_status": result["ci_status"],
             "fixes": result["fixes"],
             "timeline": result["timeline"],
-            "score": result["score"]
+            "score": result["score"],
+            "is_fork": result["is_fork"],
+            "original_repo_url": result["original_repo_url"],
+            "fork_url": result["fork_url"],
+            "pr_url": result["pr_url"],
         }
 
 

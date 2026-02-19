@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
+load_dotenv()  # MUST be before agent import so env vars are set when HealingAgent() is instantiated
+
 import os
 import json
 import time
@@ -15,8 +17,6 @@ from datetime import datetime
 from pathlib import Path
 
 from agent import run_healing_agent
-
-load_dotenv()
 
 app = FastAPI(
     title="Autonomous CI/CD Healing Agent",
