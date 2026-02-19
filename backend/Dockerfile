@@ -8,6 +8,9 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     wget \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    zlib1g-dev \
     && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
