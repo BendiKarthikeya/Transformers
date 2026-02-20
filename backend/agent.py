@@ -593,22 +593,36 @@ All changes have been automatically tested and verified. Please review the commi
 
             state["pytest_output"] = result.stdout + "\n" + result.stderr
             
-            # Count failures and collection errors
+            # Improved failure detection logic
+            lower_output = state["pytest_output"].lower()
+            
             if state.get("project_type") == "node":
-                # For Node.js, count failures using simple keywords or returncode
                 failures_jest = len(re.findall(r"FAIL\s", state["pytest_output"]))
                 failures_mocha = len(re.findall(r"failing\s", state["pytest_output"], re.IGNORECASE))
                 state["total_failures"] = max(failures_jest, failures_mocha)
                 if state["total_failures"] == 0 and result.returncode != 0:
-                    state["total_failures"] = 1  # At least 1 failure if tests crashed
+                    state["total_failures"] = 1
             else:
-                failed_count = len(re.findall(r"^FAILED\s", state["pytest_output"], re.MULTILINE))
-                error_count = len(re.findall(r"ERROR\s+collecting\s", state["pytest_output"]))
-                state["total_failures"] = failed_count + error_count
-            
+                # Capture FAILED summary lines, direct failure reports, and collection errors
+                failed_patterns = [
+                    r"^FAILED\s",               # Standard pytest failure
+                    r"^E\s+assert",             # Assertion error start
+                    r"ERROR\s+collecting\s",    # Collection error
+                    r"SyntaxError:",            # Syntax errors
+                    r"ImportError:",            # Import errors
+                    r"ModuleNotFoundError:"     # Missing dependency
+                ]
+                
+                total_failed = 0
+                for pattern in failed_patterns:
+                    total_failed += len(re.findall(pattern, state["pytest_output"], re.MULTILINE | re.IGNORECASE))
+                
+                # Deduplicate if necessary? Usually one error produces one pattern match
+                state["total_failures"] = total_failed
+
             state["timeline"].append({
                 "stage": "Run Tests",
-                "description": f"Tests completed with {state['total_failures']} failures",
+                "description": f"Scan complete. Operation detected {state['total_failures']} structural defects.",
                 "status": "completed",
                 "timestamp": datetime.now().isoformat()
             })
@@ -881,15 +895,25 @@ Test output:
                 "timestamp": datetime.now().isoformat()
             })
 
-            fixes = []
             repo_path = Path(state["repo_path"])
-            state["fix_round"] = state.get("fix_round", 0) + 1
+            fixes = state.get("fixes", [])
 
             # Group failures by file so we fix each file once with all its bugs in one LLM call
             files_to_fix: Dict[str, List[Dict]] = {}
             for failure in state["failures"]:
                 fname = failure["file"]
                 files_to_fix.setdefault(fname, []).append(failure)
+
+            if not files_to_fix:
+                state["timeline"].append({
+                    "stage": "Neural Synthesis",
+                    "description": "Sequence bypassed. No structural defects detected in current iteration.",
+                    "status": "completed",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return state
+
+            state["fix_round"] = state.get("fix_round", 0) + 1
 
             for fname, file_failures in files_to_fix.items():
                 try:
@@ -993,10 +1017,11 @@ Output the fixed Python file now:"""
 
             state["fixes"] = fixes
             state["total_fixes"] = len(fixes)
+            state["fix_round"] += 1
 
             state["timeline"].append({
-                "stage": "Generate Fixes",
-                "description": f"Generated {len(fixes)} fixes across {len(files_to_fix)} file(s)",
+                "stage": "Neural Synthesis",
+                "description": f"Sequence successful. Deployed {len(fixes)} logic corrections into {len(files_to_fix)} file(s).",
                 "status": "completed",
                 "timestamp": datetime.now().isoformat()
             })
@@ -1307,12 +1332,14 @@ Output the fixed Python file now:"""
             "total_fixes": result["total_fixes"],
             "ci_status": result["ci_status"],
             "fixes": result["fixes"],
+            "commits": result["commits"],
             "timeline": result["timeline"],
             "score": result["score"],
             "is_fork": result["is_fork"],
             "original_repo_url": result["original_repo_url"],
             "fork_url": result["fork_url"],
             "pr_url": result["pr_url"],
+            "fix_round": result["fix_round"]
         }
 
 

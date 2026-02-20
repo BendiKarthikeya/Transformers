@@ -6,6 +6,7 @@ import ScoreBreakdown from '../components/ScoreBreakdown'
 import FixesTable from '../components/FixesTable'
 import CICDTimeline from '../components/CICDTimeline'
 import { Link } from 'react-router-dom'
+import RobotLogo from '../components/RobotLogo'
 
 export default function Dashboard() {
     const { isLoading, results, error } = useAgent()
@@ -19,28 +20,30 @@ export default function Dashboard() {
             </div>
 
             {/* Header */}
-            <header className="sticky top-0 z-50 bg-slate-950/80 backdrop-blur-xl border-b border-slate-800/60 shadow-lg">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <header className="sticky top-0 z-50 bg-slate-950/60 backdrop-blur-2xl border-b border-white/5 shadow-2xl">
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
                     <div className="flex items-center justify-between">
-                        <Link to="/" className="flex items-center gap-3 group transition-transform hover:scale-105 duration-300">
-                            <div className="w-10 h-10 bg-gradient-to-br from-cyan-400 to-blue-600 rounded-xl flex items-center justify-center shadow-lg group-hover:shadow-cyan-500/50 transition-all">
-                                <span className="text-white font-bold text-xl">T</span>
-                            </div>
+                        <Link to="/" className="flex items-center gap-4 group transition-all hover:scale-[1.02] duration-500">
+                            <RobotLogo className="w-12 h-12" />
                             <div>
-                                <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-300">
+                                <h1 className="text-xl md:text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-200 to-slate-400 leading-none">
                                     TRANSFORMERS
                                 </h1>
-                                <p className="text-xs text-cyan-500 font-medium tracking-wide">CI/CD HEALING AGENT</p>
+                                <p className="text-[10px] text-cyan-500 font-black tracking-[0.2em] uppercase mt-1">AI Healing Unit</p>
                             </div>
                         </Link>
 
-                        <div className="flex items-center gap-4">
-                            <div className="hidden sm:block text-xs uppercase tracking-wider text-slate-500 font-semibold">
-                                RIFT 2026 Hackathon
+                        <div className="flex items-center gap-6">
+                            <div className="hidden md:flex flex-col items-end">
+                                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Operation Status</span>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]"></div>
+                                    <span className="text-xs font-bold text-slate-300">Active Node</span>
+                                </div>
                             </div>
-                            <div className="px-4 py-1.5 bg-slate-900 border border-slate-700/50 rounded-full flex items-center gap-2">
-                                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                                <span className="text-sm text-slate-300">System Online</span>
+                            <div className="h-8 w-px bg-slate-800 hidden md:block"></div>
+                            <div className="hidden sm:block text-[10px] uppercase font-black tracking-widest bg-slate-900/50 px-3 py-1.5 rounded-lg border border-slate-800 text-slate-400">
+                                RIFT 2026
                             </div>
                         </div>
                     </div>
@@ -57,13 +60,13 @@ export default function Dashboard() {
 
                 {/* Loading State */}
                 {isLoading && (
-                    <div className="mb-10 p-12 bg-slate-900/60 backdrop-blur-md rounded-3xl border border-slate-800/50 flex flex-col items-center justify-center animate-pulse">
+                    <div className="mb-10 p-6 md:p-12 bg-slate-900/60 backdrop-blur-md rounded-3xl border border-slate-800/50 flex flex-col items-center justify-center animate-pulse">
                         <div className="relative mb-8">
-                            <div className="w-20 h-20 border-[6px] border-slate-800 border-t-cyan-500 rounded-full animate-spin"></div>
+                            <div className="w-16 h-16 md:w-20 md:h-20 border-[6px] border-slate-800 border-t-cyan-500 rounded-full animate-spin"></div>
                             <div className="absolute inset-0 bg-cyan-500/20 rounded-full blur-2xl animate-pulse"></div>
                         </div>
-                        <h3 className="text-2xl font-bold text-white mb-2 tracking-tight">Agent Deployed</h3>
-                        <p className="text-slate-400 text-lg">Analyzing repository structure and healing bugs...</p>
+                        <h3 className="text-xl md:text-2xl font-bold text-white mb-2 tracking-tight text-center">Agent Deployed</h3>
+                        <p className="text-slate-400 text-base md:text-lg text-center">Analyzing repository structure and healing bugs...</p>
                         <div className="mt-6 flex gap-2">
                             <span className="w-2 h-2 bg-cyan-500 rounded-full animate-bounce"></span>
                             <span className="w-2 h-2 bg-cyan-500 rounded-full animate-bounce delay-100"></span>
@@ -106,10 +109,21 @@ export default function Dashboard() {
 
                 {/* Empty State */}
                 {!results && !isLoading && !error && (
-                    <div className="py-24 text-center rounded-3xl border-2 border-dashed border-slate-800/50 bg-slate-900/20 backdrop-blur-sm">
-                        <div className="text-7xl mb-6 opacity-30 blur-sm hover:blur-none transition-all duration-500 cursor-default">⚡</div>
-                        <h2 className="text-2xl font-bold text-slate-300 mb-2">Ready to Initialize</h2>
-                        <p className="text-slate-500 max-w-md mx-auto">Enter a GitHub repository URL above to launch the autonomous agent.</p>
+                    <div className="relative group py-20 px-6 text-center rounded-[40px] border border-white/5 bg-slate-900/40 backdrop-blur-xl overflow-hidden shadow-2xl">
+                        <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 to-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-1000"></div>
+                        <div className="relative z-10">
+                            <div className="flex justify-center mb-8">
+                                <div className="relative">
+                                    <div className="absolute inset-0 bg-cyan-500/20 blur-2xl rounded-full scale-150 animate-pulse"></div>
+                                    <RobotLogo className="w-24 h-24 relative z-10 opacity-40 hover:opacity-100 transition-opacity duration-500" />
+                                </div>
+                            </div>
+                            <h2 className="text-2xl md:text-3xl font-black text-white mb-3 tracking-tighter italic uppercase">System Idle</h2>
+                            <p className="text-slate-500 max-w-md mx-auto font-bold uppercase tracking-[0.2em] text-[10px]">
+                                Awaiting mission coordinates. <br />
+                                <span className="text-slate-700">Submit a repository URL to deploy autonomous healing sequence.</span>
+                            </p>
+                        </div>
                     </div>
                 )}
             </main>
@@ -117,7 +131,6 @@ export default function Dashboard() {
             {/* Footer */}
             <footer className="border-t border-slate-800/30 mt-20 backdrop-blur-sm bg-slate-950/50 py-10">
                 <div className="max-w-7xl mx-auto px-6 text-center">
-                    <p className="text-slate-500 text-sm font-medium">Powered by Groq Llama-3 • LangGraph • React</p>
                     <p className="text-slate-600 text-xs mt-2">© 2026 TRANSFORMERS Team • RIFT Hackathon</p>
                 </div>
             </footer>

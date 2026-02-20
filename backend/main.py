@@ -54,11 +54,13 @@ class RunAgentResponse(BaseModel):
     time_taken: float
     score: int
     fixes: list
+    commits: list = []
     timeline: list
     is_fork: bool
     original_repo_url: str = None
     fork_url: str = None
     pr_url: str = None
+    fix_round: int = 0
 
 
 def save_results(results: dict) -> None:
@@ -179,11 +181,13 @@ async def run_agent(request: RunAgentRequest):
             "time_taken": time_taken,
             "score": agent_results.get("score", 0),
             "fixes": agent_results.get("fixes", []),
+            "commits": agent_results.get("commits", []),
             "timeline": agent_results.get("timeline", timeline),
             "is_fork": agent_results.get("is_fork", False),
             "original_repo_url": agent_results.get("original_repo_url"),
             "fork_url": agent_results.get("fork_url"),
-            "pr_url": agent_results.get("pr_url")
+            "pr_url": agent_results.get("pr_url"),
+            "fix_round": agent_results.get("fix_round", 0)
         }
         
         # Add final timeline entry
