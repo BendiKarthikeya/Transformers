@@ -419,7 +419,7 @@ All changes have been automatically tested and verified. Please review the commi
                 })
             else:
                 state["is_fork"] = False
-                state["original_repo_url"] = None
+                state["original_repo_url"] = state["repo_url"]
 
             # ── Clone ──
             repo_path = self.repo_base / repo_name
@@ -1093,9 +1093,11 @@ Output the fixed Python file now:"""
             repo_path = Path(state["repo_path"])
             repo = git.Repo(str(repo_path))
             
-            # Create branch name (uppercase + underscores per PS spec)
+            # Create branch name (uppercase + underscores per PS spec) with a unique timestamp suffix
             raw_name = f"{state['team_name']}_{state['team_leader']}_AI_Fix"
-            branch_name = re.sub(r'[^A-Za-z0-9_]', '_', raw_name).upper().replace('__', '_')
+            base_branch = re.sub(r'[^A-Za-z0-9_]', '_', raw_name).upper().replace('__', '_')
+            unique_suffix = datetime.now().strftime("%H%M%S")
+            branch_name = f"{base_branch}_{unique_suffix}"
             state["branch_name"] = branch_name
 
             # Always start fresh: delete local branch if it exists, then recreate from HEAD
@@ -1297,8 +1299,8 @@ Output the fixed Python file now:"""
             
             state["score"] = max(0, min(100, score))
             
-            # Create PR if repository was forked
-            if state.get("is_fork") and state.get("original_repo_url"):
+            # Create PR (whether it was forked, or creating a PR against own repo)
+            if state.get("original_repo_url"):
                 state["timeline"].append({
                     "stage": "Create Pull Request",
                     "description": "Creating PR to original repository",
