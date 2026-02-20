@@ -61,6 +61,7 @@ class RunAgentResponse(BaseModel):
     fork_url: str = None
     pr_url: str = None
     fix_round: int = 0
+    project_type: str = "python"
 
 
 def save_results(results: dict) -> None:
@@ -187,7 +188,8 @@ async def run_agent(request: RunAgentRequest):
             "original_repo_url": agent_results.get("original_repo_url"),
             "fork_url": agent_results.get("fork_url"),
             "pr_url": agent_results.get("pr_url"),
-            "fix_round": agent_results.get("fix_round", 0)
+            "fix_round": agent_results.get("fix_round", 0),
+            "project_type": agent_results.get("project_type", "python")
         }
         
         # Add final timeline entry

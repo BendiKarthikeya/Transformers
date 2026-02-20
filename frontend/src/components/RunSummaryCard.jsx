@@ -34,6 +34,11 @@ export default function RunSummaryCard({ results }) {
                 <span className={`px-3 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest ${ciStatus ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
                   {ciStatus ? 'Stable' : 'Unstable'}
                 </span>
+                {results.time_taken && (
+                  <span className="px-3 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest bg-slate-800 text-slate-300 border border-slate-700">
+                    {formatTime(results.time_taken)}
+                  </span>
+                )}
               </div>
               <p className="text-slate-500 text-sm font-medium mt-1">ID: <span className="font-mono">{results.repo_url?.split('/').pop() || 'N/A'}</span> • {results.project_type?.toUpperCase() || 'CORE'} ENGINE</p>
             </div>

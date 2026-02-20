@@ -550,48 +550,68 @@ All changes have been automatically tested and verified. Please review the commi
             abs_repo_path = str(repo_path.absolute())
             
             use_docker = os.getenv("USE_DOCKER", "true").lower() == "true"
+            result = None
             
             if state.get("project_type") == "node":
                 if use_docker:
-                    print(f"Running npm install and tests using Docker...")
-                    result = subprocess.run(
-                        [
-                            "docker", "run", "--rm",
-                            "-v", f"{abs_repo_path}:/app",
-                            "-w", "/app",
-                            "node:18",
-                            "sh", "-c", "npm install && npm test"
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=300
-                    )
-                else:
+                    try:
+                        print(f"Running npm install and tests using Docker...")
+                        result = subprocess.run(
+                            [
+                                "docker", "run", "--rm",
+                                "-v", f"{abs_repo_path}:/app",
+                                "-w", "/app",
+                                "node:18",
+                                "sh", "-c", "npm install && npm test"
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=300
+                        )
+                        if result.returncode != 0 and "Cannot connect to the Docker daemon" in result.stderr:
+                            print("Docker daemon not running. Falling back to local.")
+                            use_docker = False
+                    except Exception as de:
+                        print(f"Docker failed: {de}. Falling back to local.")
+                        use_docker = False
+                
+                if not use_docker or not result:
                     print(f"Running npm install and tests locally (Azure Mode)...")
                     subprocess.run(["npm", "install"], cwd=str(repo_path), capture_output=True, timeout=180)
                     result = subprocess.run(["npm", "test"], cwd=str(repo_path), capture_output=True, text=True, timeout=180)
             else:
                 if use_docker:
-                    print(f"Running pytest using Docker...")
-                    result = subprocess.run(
-                        [
-                            "docker", "run", "--rm",
-                            "-v", f"{abs_repo_path}:/app",
-                            "-w", "/app",
-                            "python:3.10",
-                            "sh", "-c",
-                            "pip install pytest && (if [ -f requirements.txt ]; then pip install -r requirements.txt; fi) && pytest -v --tb=long " + " ".join(state["test_files"])
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=300
-                    )
-                else:
+                    try:
+                        print(f"Running pytest using Docker...")
+                        result = subprocess.run(
+                            [
+                                "docker", "run", "--rm",
+                                "-v", f"{abs_repo_path}:/app",
+                                "-w", "/app",
+                                "python:3.10",
+                                "sh", "-c",
+                                "pip install pytest && (if [ -f requirements.txt ]; then pip install -r requirements.txt; fi) && pytest -v --tb=long " + " ".join(state["test_files"])
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=300
+                        )
+                        # Check for docker daemon error
+                        if result.returncode != 0 and "Cannot connect to the Docker daemon" in result.stderr:
+                            print("Docker daemon not running. Falling back to local.")
+                            use_docker = False
+                    except Exception as de:
+                        print(f"Docker failed: {de}. Falling back to local.")
+                        use_docker = False
+                
+                if not use_docker or not result:
                     print(f"Running pytest locally (Azure Mode)...")
                     test_file_paths = [str(repo_path / f) for f in state["test_files"]]
-                    result = subprocess.run(["pytest", "-v", "--tb=long"] + test_file_paths, cwd=str(repo_path), capture_output=True, text=True, timeout=120)
+                    env = os.environ.copy()
+                    env["PYTHONPATH"] = str(repo_path) + os.pathsep + env.get("PYTHONPATH", "")
+                    result = subprocess.run(["pytest", "-v", "--tb=long"] + test_file_paths, cwd=str(repo_path), env=env, capture_output=True, text=True, timeout=120)
 
-            state["pytest_output"] = result.stdout + "\n" + result.stderr
+            state["pytest_output"] = (result.stdout or "") + "\n" + (result.stderr or "")
             
             # Improved failure detection logic
             lower_output = state["pytest_output"].lower()
@@ -605,35 +625,54 @@ All changes have been automatically tested and verified. Please review the commi
             else:
                 # Capture FAILED summary lines, direct failure reports, and collection errors
                 failed_patterns = [
-                    r"^FAILED\s",               # Standard pytest failure
-                    r"^E\s+assert",             # Assertion error start
+                    r"FAILED\s",               # Standard pytest failure
+                    r"^E\s+",                  # Assertion error start
                     r"ERROR\s+collecting\s",    # Collection error
                     r"SyntaxError:",            # Syntax errors
                     r"ImportError:",            # Import errors
-                    r"ModuleNotFoundError:"     # Missing dependency
+                    r"ModuleNotFoundError:",    # Missing dependency
+                    r"AssertionError"           # Assertion logic
                 ]
                 
-                total_failed = 0
-                for pattern in failed_patterns:
-                    total_failed += len(re.findall(pattern, state["pytest_output"], re.MULTILINE | re.IGNORECASE))
+                # Capture failures using a more flexible regex that covers both:
+                # Capture failures using a more flexible regex that extracts the test path
+                test_failure_matches = re.findall(r"(\S+::\S+)\s+FAILED|FAILED\s+(\S+::\S+)", state["pytest_output"])
+                unique_tests = set()
+                for match in test_failure_matches:
+                    for val in match:
+                        if val:
+                            unique_tests.add(val)
+                total_failed = len(unique_tests)
                 
-                # Deduplicate if necessary? Usually one error produces one pattern match
+                if total_failed == 0:
+                    # Fallback to general error patterns if specific test failures aren't found
+                    for pattern in failed_patterns:
+                        total_failed += len(re.findall(pattern, state["pytest_output"], re.MULTILINE | re.IGNORECASE))
+                
+                if total_failed == 0 and result.returncode != 0:
+                    # If exit code is non-zero but no patterns matched, assume at least 1 failure
+                    total_failed = 1
+                    
                 state["total_failures"] = total_failed
+
 
             state["timeline"].append({
                 "stage": "Run Tests",
-                "description": f"Scan complete. Operation detected {state['total_failures']} structural defects.",
+                "description": f"Tests completed with {state['total_failures']} failures",
                 "status": "completed",
                 "timestamp": datetime.now().isoformat()
             })
             
-            print(f"Pytest output:\\n{state['pytest_output']}")
+            print(f"Tests output length: {len(state['pytest_output'])}. Failures found: {state['total_failures']}")
+            with open(Path(__file__).parent / "results" / "pytest_debug.txt", "w") as f:
+                f.write(state['pytest_output'])
         except Exception as e:
             state["error"] = f"Failed to run tests: {str(e)}"
             state["ci_status"] = "failed"
             print(f"Error running tests: {e}")
         
         return state
+
     
     def analyze_failures_node(self, state: AgentState) -> AgentState:
         """Parse pytest --tb=long output and map failures to source files."""
@@ -678,16 +717,23 @@ Test output:
             elif state.get("project_type") != "node":
                 # Split pytest output into per-test failure blocks
                 blocks = re.split(r"_{5,}\s+\S.*?\s+_{5,}", pytest_output)
+                if len(blocks) <= 1 and "FAILURES" in pytest_output:
+                    blocks = pytest_output.split("________________")
             else:
                 blocks = []
 
             # Also grab the FAILED summary lines to collect test→msg mappings
             # Format: FAILED tests/test_foo.py::test_bar - some message
             failed_summary = {}
-            for m in re.finditer(r"^FAILED\s+(\S+)\s+-\s+(.*)", pytest_output, re.MULTILINE):
+            for m in re.finditer(r"FAILED\s+(\S+)\s+-\s+(.*)", pytest_output, re.MULTILINE):
                 failed_summary[m.group(1)] = m.group(2).strip()
+            
+            for m in re.finditer(r"(\S+)\s+FAILED", pytest_output, re.MULTILINE):
+                if m.group(1) not in failed_summary:
+                    failed_summary[m.group(1)] = "Test failed"
 
             for block in blocks:
+
                 if not block.strip():
                     continue
 
