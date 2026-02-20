@@ -586,6 +586,7 @@ All changes have been automatically tested and verified. Please review the commi
                         result = subprocess.run(
                             [
                                 "docker", "run", "--rm",
+                                "-e", "PYTHONPATH=/app",
                                 "-v", f"{abs_repo_path}:/app",
                                 "-w", "/app",
                                 "python:3.10",
@@ -1221,6 +1222,7 @@ Output the fixed Python file now:"""
                             result = subprocess.run(
                                 [
                                     "docker", "run", "--rm",
+                                    "-e", "PYTHONPATH=/app",
                                     "-v", f"{abs_repo_path}:/app",
                                     "-w", "/app",
                                     "python:3.10",
@@ -1233,7 +1235,9 @@ Output the fixed Python file now:"""
                             )
                         else:
                             print("Verifying pytest locally (Azure Mode)...")
-                            result = subprocess.run(["pytest", "-v", "--tb=short"] + test_file_paths, cwd=str(repo_path), capture_output=True, text=True, timeout=120)
+                            env = os.environ.copy()
+                            env["PYTHONPATH"] = str(repo_path) + os.pathsep + env.get("PYTHONPATH", "")
+                            result = subprocess.run(["pytest", "-v", "--tb=short"] + test_file_paths, cwd=str(repo_path), env=env, capture_output=True, text=True, timeout=120)
                     
                     # Check if all tests passed
                     if result.returncode == 0:
